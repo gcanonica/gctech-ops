@@ -1,0 +1,23 @@
+{
+  "name": "gc-eletronica-ops",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "create:test-approval": "tsx src/scripts/createTestApprovalTask.ts",
+    "dev": "tsx src/server.ts",
+    "test:inbound": "tsx src/scripts/sendTestInbound.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.8.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  }
+}
