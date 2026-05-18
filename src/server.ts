@@ -9,6 +9,8 @@ import {
   saveCollectingConversation,
   upsertContactByPhone,
 } from './webhooks/conversationStore';
+import { buildFaqReply } from './webhooks/faqReplies';
+import { detectIntent } from './webhooks/intentDetection';
 import { parseInboundMessage } from './webhooks/parseInboundMessage';
 import { buildInvalidPayloadReply, buildMissingFieldReply } from './webhooks/replies';
 
@@ -73,15 +75,27 @@ app.post('/webhooks/whatsapp/inbound', requireWebhookToken, async (req, res) => 
     }
 
     const activeConversation = await findActiveConversationByPhone(db, parsed.phone);
+    const intent = detectIntent(parsed.message, activeConversation?.data);
 
     if (activeConversation?.data.status === 'waiting_approval' && activeConversation.data.approvalTaskId) {
       return res.status(200).json({
         ok: true,
         status: 'waiting_approval',
+        intent: intent.intent,
         approvalTaskId: activeConversation.data.approvalTaskId,
         contactId: activeConversation.data.contactId,
         conversationId: activeConversation.id,
         reply: 'Seu atendimento ja esta separado para confirmacao. Assim que for aprovado, te aviso por aqui.',
+      });
+    }
+
+    if (!activeConversation && !intent.shouldStartServiceFlow) {
+      return res.status(200).json({
+        ok: true,
+        status: intent.intent === 'complaint' || intent.intent === 'human_help' ? 'needs_human' : 'faq_answer',
+        intent: intent.intent,
+        confidence: intent.confidence,
+        reply: buildFaqReply(intent.intent),
       });
     }
 
@@ -95,6 +109,21 @@ app.post('/webhooks/whatsapp/inbound', requireWebhookToken, async (req, res) => 
       fields: collectedFields,
     });
     const missingFields = getMissingRequiredFieldIds(collectedFields);
+    const faqReply = intent.intent !== 'new_service_order'
+      ? buildFaqReply(intent.intent, collectedFields)
+      : undefined;
+
+    if (activeConversation && !intent.shouldContinueActiveFlow && faqReply) {
+      return res.status(200).json({
+        ok: true,
+        status: intent.intent === 'complaint' || intent.intent === 'human_help' ? 'needs_human' : 'faq_answer',
+        intent: intent.intent,
+        confidence: intent.confidence,
+        contactId: contactResult.contact.id,
+        conversationId: activeConversation.id,
+        reply: faqReply,
+      });
+    }
 
     if (!isCompleteWhatsAppIntake(collectedFields)) {
       const conversationResult = await saveCollectingConversation(db, {
@@ -110,10 +139,14 @@ app.post('/webhooks/whatsapp/inbound', requireWebhookToken, async (req, res) => 
       return res.status(200).json({
         ok: true,
         status: 'collecting_data',
+        intent: intent.intent,
+        confidence: intent.confidence,
         missingFields,
         contactId: contactResult.contact.id,
         conversationId: conversationResult.conversation.id,
-        reply: buildMissingFieldReply(missingFields, collectedFields),
+        reply: faqReply
+          ? `${faqReply}\n\nPara continuar o agendamento: ${buildMissingFieldReply(missingFields, collectedFields)}`
+          : buildMissingFieldReply(missingFields, collectedFields),
       });
     }
 
@@ -129,6 +162,8 @@ app.post('/webhooks/whatsapp/inbound', requireWebhookToken, async (req, res) => 
     res.status(201).json({
       ok: true,
       status: 'approval_created',
+      intent: intent.intent,
+      confidence: intent.confidence,
       approvalTaskId: result.approvalTask.id,
       contactId: result.contact.id,
       conversationId: result.conversation.id,

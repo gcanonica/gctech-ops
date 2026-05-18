@@ -111,11 +111,16 @@ function normalizeText(text: string) {
   return text
     .toLowerCase()
     .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '');
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function inferCustomerName(message: string) {
-  const match = message.match(/\b(?:me chamo|meu nome e|sou)\s+([A-Za-z][A-Za-z ]{1,48})/i);
+  const match = message.match(
+    /\b(?:me chamo|meu nome e|sou)\s+([\p{Letter}][\p{Letter} ]{1,48}?)(?=\s*(?:,|\.|\n|$|\b(?:tenho|estou|to|tou|meu|minha|quero|queria|preciso|gostaria)\b))/iu
+  );
+
   return match?.[1]?.replace(/\s+/g, ' ').trim();
 }
 
@@ -126,14 +131,24 @@ function inferDeviceType(message: string): DeviceType {
     normalized.includes('iphone') ||
     normalized.includes('android') ||
     normalized.includes('celular') ||
+    normalized.includes('smartphone') ||
     normalized.includes('samsung') ||
+    normalized.includes('galaxy') ||
     normalized.includes('motorola') ||
-    normalized.includes('xiaomi')
+    normalized.includes('xiaomi') ||
+    normalized.includes('redmi') ||
+    normalized.includes('poco')
   ) {
     return 'celular';
   }
 
-  if (normalized.includes('notebook') || normalized.includes('laptop') || normalized.includes('macbook')) {
+  if (
+    normalized.includes('notebook') ||
+    normalized.includes('laptop') ||
+    normalized.includes('macbook') ||
+    normalized.includes('computador') ||
+    normalized.includes('pc ')
+  ) {
     return 'notebook';
   }
 
@@ -167,9 +182,14 @@ function inferAttendanceMode(message: string): AttendanceMode {
   if (
     normalized.includes('trazer') ||
     normalized.includes('levar') ||
+    normalized.includes('levo') ||
+    normalized.includes('deixar') ||
+    normalized.includes('deixo') ||
     normalized.includes('entregar') ||
     normalized.includes('passar ai') ||
-    normalized.includes('vou ai')
+    normalized.includes('vou ai') ||
+    normalized.includes('ir na loja') ||
+    normalized.includes('ir ate voces')
   ) {
     return 'customer_dropoff';
   }
@@ -177,6 +197,8 @@ function inferAttendanceMode(message: string): AttendanceMode {
   if (
     normalized.includes('visita') ||
     normalized.includes('em casa') ||
+    normalized.includes('minha casa') ||
+    normalized.includes('domicilio') ||
     normalized.includes('no local') ||
     normalized.includes('tecnico') ||
     normalized.includes('vem ate') ||
@@ -199,20 +221,38 @@ function inferCity(message: string): ServiceCity {
 }
 
 function inferDeviceName(message: string) {
+  const detailToken = String.raw`(?!que\b|com\b|na\b|no\b|nao\b|sem\b|esta\b|ta\b|caiu\b|agua\b|molhou\b|parou\b|liga\b|carrega\b|lento\b|travando\b|desliga\b|quebrad\w*\b|defeito\b|problema\b|tela\b|bateria\b|amanha\b|hoje\b|segunda\b|terca\b|quarta\b|quinta\b|sexta\b|sabado\b|domingo\b|as\b|para\b|quero\b|queria\b|preciso\b)[A-Za-z0-9-]+`;
   const patterns = [
-    /\b(iPhone\s?\d{1,2}(?:\s?(?:Pro|Plus|Max|Mini))?)\b/i,
-    /\b(PS5|PS4|Xbox\s?(?:One|Series)?|Nintendo\s?Switch)\b/i,
+    /\b(iPhone\s?\d{0,2}(?:\s?(?:Pro|Plus|Max|Mini))?)\b/i,
+    /\b(PS5|PS4|PlayStation\s?\d?|Xbox\s?(?:One|Series\s?[SX]?)?|Nintendo\s?Switch)\b/i,
     /\b(RTX\s?\d{3,4}|GTX\s?\d{3,4})\b/i,
-    /\b(MacBook(?:\s?(?:Air|Pro))?|Notebook\s+[A-Za-z0-9 -]+)\b/i,
-    /\b(Samsung\s+[A-Za-z0-9 -]+|Motorola\s+[A-Za-z0-9 -]+|Xiaomi\s+[A-Za-z0-9 -]+)\b/i,
+    new RegExp(String.raw`\b(MacBook(?:\s?(?:Air|Pro))?|Notebook(?:\s+${detailToken}){0,4})\b`, 'i'),
+    new RegExp(String.raw`\b(Samsung(?:\s+Galaxy)?(?:\s+${detailToken}){0,4}|Galaxy(?:\s+${detailToken}){1,4}|Motorola(?:\s+${detailToken}){0,4}|Moto(?:\s+${detailToken}){1,4}|Xiaomi(?:\s+${detailToken}){0,4}|Redmi(?:\s+${detailToken}){1,4}|Poco(?:\s+${detailToken}){1,4})\b`, 'i'),
+    /\b(celular|smartphone|videogame|video game|notebook|computador|pc)\b/i,
   ];
 
   for (const pattern of patterns) {
     const match = message.match(pattern);
-    if (match?.[1]) return match[1].trim();
+    const deviceName = match?.[1]?.replace(/\s+/g, ' ').trim();
+    if (deviceName) return canonicalizeDeviceName(deviceName);
   }
 
   return undefined;
+}
+
+function canonicalizeDeviceName(deviceName: string) {
+  const normalized = normalizeText(deviceName);
+
+  if (normalized === 'iphone') return 'iPhone';
+  if (normalized === 'ps5') return 'PS5';
+  if (normalized === 'ps4') return 'PS4';
+  if (normalized === 'notebook') return 'Notebook';
+  if (normalized === 'celular') return 'Celular';
+  if (normalized === 'smartphone') return 'Smartphone';
+  if (normalized === 'videogame' || normalized === 'video game') return 'Videogame';
+  if (normalized === 'computador' || normalized === 'pc') return 'Computador';
+
+  return deviceName;
 }
 
 function buildAddressRaw(address: ContactAddress) {
@@ -233,14 +273,15 @@ function sanitizeComplement(value?: string) {
 
 function inferAddress(message: string, city: ServiceCity) {
   const streetMatch = message.match(
-    /\b(?:rua|r\.|avenida|av\.|travessa|tv\.|alameda|rodovia)\s+([^,.;\n]+?)(?=(?:,\s*\d+)|(?:\s+num\.?\s*\d+)|(?:,\s*(?:bairro|centro|vila|jardim))|(?:,\s*(?:apto|apartamento|bloco|torre|condominio))|[.;\n]|$)/i
+    /\b((?:rua|r\.|avenida|av\.|travessa|tv\.|alameda|rodovia)\s+[^,.;\n]+?)(?=\s+(?:numero|num\.?|n\.?|bairro|complemento|apto|apartamento|bloco|torre|condominio)\b|,\s*(?:\d+|bairro|complemento|apto|apartamento|bloco|torre|condominio)|[.;\n]|$)/i
   );
-  const numberMatch = message.match(/\b(?:num(?:ero)?\.?\s*|,\s*)(\d+[A-Za-z-]*)\b/i);
+  const numberMatch = message.match(/\b(?:numero|num\.?|n\.?)\s*(\d+[A-Za-z-]*)\b/i) ||
+    message.match(/,\s*(\d+[A-Za-z-]*)\b/i);
   const neighborhoodMatch = message.match(
-    /\b(?:bairro|centro|vila|jardim)\s*[:\-]?\s*([^,.;\n]+)?/i
+    /\bbairro\s*[:\-]?\s*([^,.;\n]+?)(?=\s+(?:complemento|apto|apartamento|bloco|torre|condominio|numero|num\.?|n\.?)\b|[.;\n]|$)/i
   );
   const apartmentMatch = message.match(
-    /\b(?:apto|apartamento|bloco|torre|condominio)\s*[:\-]?\s*([^,.;\n]+)?/i
+    /\b(?:complemento|apto|apartamento|bloco|torre|condominio)\s*[:\-]?\s*([^,.;\n]+?)(?=[.;\n]|$)/i
   );
   const rawSegment = message.match(
     /(?:endereco|moro na|moro no|rua|avenida|av\.|travessa|alameda|rodovia)\s*[:\-]?\s*([^.;\n]+)/i
@@ -249,9 +290,9 @@ function inferAddress(message: string, city: ServiceCity) {
   const address: ContactAddress = {
     city,
     raw: rawSegment,
-    street: streetMatch?.[0]?.trim(),
+    street: streetMatch?.[1]?.trim(),
     number: numberMatch?.[1]?.trim(),
-    neighborhood: neighborhoodMatch?.[1]?.trim() || neighborhoodMatch?.[0]?.trim(),
+    neighborhood: neighborhoodMatch?.[1]?.trim(),
     complement: sanitizeComplement(apartmentMatch?.[1]),
   };
 
@@ -278,7 +319,9 @@ function inferPreferredTime(message: string, timestamp?: string) {
   const normalized = normalizeText(message);
   const base = timestamp ? new Date(timestamp) : new Date();
   const safeBase = Number.isNaN(base.getTime()) ? new Date() : base;
-  const timeMatch = normalized.match(/(?:as|para|por volta de|depois das|antes das)\s*(\d{1,2})(?::?(\d{2}))?\s*h?/i);
+  const timeMatch =
+    normalized.match(/(?:as|para|por volta de|depois das|antes das)\s*(\d{1,2})(?::?(\d{2}))?\s*h?/i) ||
+    normalized.match(/\b(\d{1,2})(?:(?::|h)(\d{2})?|h)\b/i);
   const explicitDate = normalized.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
 
   const hasDateHint =
@@ -338,6 +381,15 @@ function inferPreferredTime(message: string, timestamp?: string) {
   return date.toISOString();
 }
 
+function inferPreferredPeriod(message: string): WhatsAppIntakeFields['preferredPeriod'] | undefined {
+  const normalized = normalizeText(message);
+
+  if (/\b(?:de|da|pela|periodo da)?\s*manha\b/.test(normalized)) return 'manha';
+  if (/\b(?:de|da|pela|periodo da)?\s*tarde\b/.test(normalized)) return 'tarde';
+
+  return undefined;
+}
+
 function inferProblemDescription(message: string) {
   const normalized = normalizeText(message);
   const casualMessages = ['oi', 'ola', 'bom dia', 'boa tarde', 'boa noite'];
@@ -352,6 +404,13 @@ function inferProblemDescription(message: string) {
     'agua',
     'lento',
     'lenta',
+    'troca',
+    'trocar',
+    'manutencao',
+    'limpeza',
+    'formatacao',
+    'display',
+    'touch',
     'nao liga',
     'nao carrega',
     'sem imagem',
@@ -359,7 +418,13 @@ function inferProblemDescription(message: string) {
     'tela',
     'bateria',
     'conector',
+    'carregador',
+    'hd',
+    'ssd',
+    'fonte',
+    'controle',
     'molhou',
+    'desliga',
     'esquentando',
     'travando',
     'formatar',
@@ -390,6 +455,7 @@ export function parseInboundMessage(rawPayload: unknown): ParsedInboundResult {
   const deviceName = message ? inferDeviceName(message) : undefined;
   const problemDescription = message ? inferProblemDescription(message) : undefined;
   const preferredTime = message ? inferPreferredTime(message, payload.timestamp) : undefined;
+  const preferredPeriod = message ? inferPreferredPeriod(message) : undefined;
   const deviceType = message ? inferDeviceType(message) : undefined;
 
   return {
@@ -409,8 +475,15 @@ export function parseInboundMessage(rawPayload: unknown): ParsedInboundResult {
       city,
       neighborhood: address?.raw,
       address,
+      preferredPeriod,
       preferredTime,
-      urgency: message && normalizeText(message).includes('urgente') ? 'urgente' : undefined,
+      urgency: message && (
+        normalizeText(message).includes('urgente') ||
+        normalizeText(message).includes('quanto antes') ||
+        normalizeText(message).includes('hoje ainda')
+      )
+        ? 'urgente'
+        : undefined,
     },
   };
 }
