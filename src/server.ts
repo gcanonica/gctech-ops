@@ -1,5 +1,9 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import { z } from 'zod';
 import { getMissingRequiredFieldIds, isCompleteWhatsAppIntake } from './domain/intakeFields';
 import { getGCTechAdminDb } from './integrations/firebaseAdmin';
 import { createWhatsAppAppointmentApproval } from './workflows/approvalTasks';
@@ -17,8 +21,26 @@ import { buildInvalidPayloadReply, buildMissingFieldReply } from './webhooks/rep
 const app = express();
 const port = Number(process.env.OPS_PORT || 3100);
 const db = getGCTechAdminDb();
+const inboundPayloadSchema = z.record(z.string(), z.unknown());
 
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(helmet({
+  contentSecurityPolicy: false,
+}));
+app.use(express.json({ limit: '128kb' }));
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
+
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 function isLocalRequest(req: express.Request) {
   const remoteAddress = req.socket.remoteAddress || '';
@@ -44,7 +66,7 @@ function requireWebhookToken(req: express.Request, res: express.Response, next: 
     });
   }
 
-  if (bearerToken !== expectedToken && headerToken !== expectedToken) {
+  if (!tokensMatch(bearerToken, expectedToken) && !tokensMatch(headerToken, expectedToken)) {
     return res.status(401).json({
       ok: false,
       error: 'Token do webhook invalido.',
@@ -54,6 +76,15 @@ function requireWebhookToken(req: express.Request, res: express.Response, next: 
   next();
 }
 
+function tokensMatch(receivedToken: string | undefined, expectedToken: string) {
+  if (!receivedToken) return false;
+
+  const received = Buffer.from(receivedToken);
+  const expected = Buffer.from(expectedToken);
+
+  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -61,8 +92,18 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.post('/webhooks/whatsapp/inbound', requireWebhookToken, async (req, res) => {
+app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, async (req, res) => {
   try {
+    const bodyValidation = inboundPayloadSchema.safeParse(req.body);
+
+    if (!bodyValidation.success) {
+      return res.status(400).json({
+        ok: false,
+        status: 'invalid_payload',
+        reply: buildInvalidPayloadReply(['payload']),
+      });
+    }
+
     const parsed = parseInboundMessage(req.body);
 
     if (parsed.missingPayloadFields.length > 0) {
@@ -173,7 +214,7 @@ app.post('/webhooks/whatsapp/inbound', requireWebhookToken, async (req, res) => 
     console.error('Inbound webhook error:', error);
     res.status(500).json({
       ok: false,
-      error: error instanceof Error ? error.message : 'Erro ao processar webhook.',
+      error: 'Erro ao processar webhook.',
     });
   }
 });

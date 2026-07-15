@@ -1,4 +1,4 @@
-import admin from 'firebase-admin';
+import { applicationDefault, cert, getApp, getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,14 +18,14 @@ function getCredential() {
   const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
   if (serviceAccountJson?.trim()) {
-    return admin.credential.cert(JSON.parse(serviceAccountJson));
+    return cert(JSON.parse(serviceAccountJson));
   }
 
   if (serviceAccountPath?.trim()) {
-    return admin.credential.cert(readJsonFile(serviceAccountPath));
+    return cert(readJsonFile(serviceAccountPath));
   }
 
-  return admin.credential.applicationDefault();
+  return applicationDefault();
 }
 
 export function getGCTechAdminDb() {
@@ -41,9 +41,9 @@ export function getGCTechAdminDb() {
     throw new Error('firebase-applet-config.json nao possui projectId.');
   }
 
-  const app = admin.apps.length
-    ? admin.app()
-    : admin.initializeApp({
+  const app = getApps().length
+    ? getApp()
+    : initializeApp({
         projectId: firebaseConfig.projectId,
         credential: getCredential(),
       });

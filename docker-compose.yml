@@ -1,0 +1,13 @@
+services:
+  gctech-ops:
+    build:
+      context: .
+    container_name: gctech-ops
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "3100:3100"
+    volumes:
+      - ../GCTech/firebase-applet-config.json:/app/firebase-applet-config.json:ro
+      - ./secrets/firebase-service-account.json:/run/secrets/firebase-service-account.json:ro
