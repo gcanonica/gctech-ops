@@ -4,9 +4,20 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { z } from 'zod';
+import { parseEnv } from './config/env';
 import { getMissingRequiredFieldIds, isCompleteWhatsAppIntake } from './domain/intakeFields';
 import { getGCTechAdminDb } from './integrations/firebaseAdmin';
 import { createWhatsAppAppointmentApproval } from './workflows/approvalTasks';
+import {
+  claimMessagesSchema,
+  claimPendingMessages,
+  enqueueWhatsAppMessage,
+  failedMessageSchema,
+  markMessageFailed,
+  markMessageSent,
+  OutboxError,
+  sentMessageSchema,
+} from './outbox/messageOutbox';
 import {
   findActiveConversationByPhone,
   mergeIntakeFields,
@@ -16,14 +27,17 @@ import {
 import { buildFaqReply } from './webhooks/faqReplies';
 import { detectIntent } from './webhooks/intentDetection';
 import { parseInboundMessage } from './webhooks/parseInboundMessage';
+import { buildIdempotencyKey, claimWebhookEvent, completeWebhookEvent, releaseWebhookEvent } from './webhooks/idempotency';
 import { buildInvalidPayloadReply, buildMissingFieldReply } from './webhooks/replies';
 
 const app = express();
-const port = Number(process.env.OPS_PORT || 3100);
+const env = parseEnv();
+const port = env.OPS_PORT;
 const db = getGCTechAdminDb();
 const inboundPayloadSchema = z.record(z.string(), z.unknown());
 
 app.disable('x-powered-by');
+if (env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
 app.use(helmet({
   contentSecurityPolicy: false,
 }));
@@ -48,7 +62,7 @@ function isLocalRequest(req: express.Request) {
 }
 
 function requireWebhookToken(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const expectedToken = process.env.OPS_WEBHOOK_TOKEN?.trim();
+  const expectedToken = env.OPS_WEBHOOK_TOKEN;
   const authHeader = req.headers.authorization;
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined;
   const headerToken = typeof req.headers['x-webhook-token'] === 'string'
@@ -76,6 +90,19 @@ function requireWebhookToken(req: express.Request, res: express.Response, next: 
   next();
 }
 
+function requireOutboxToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const expectedToken = env.OPS_OUTBOX_TOKEN;
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined;
+  const headerToken = typeof req.headers['x-outbox-token'] === 'string' ? req.headers['x-outbox-token'].trim() : undefined;
+  if (!expectedToken && isLocalRequest(req)) return next();
+  if (!expectedToken) return res.status(503).json({ ok: false, error: 'OPS_OUTBOX_TOKEN nao configurado.' });
+  if (!tokensMatch(bearerToken, expectedToken) && !tokensMatch(headerToken, expectedToken)) {
+    return res.status(401).json({ ok: false, error: 'Token da outbox invalido.' });
+  }
+  next();
+}
+
 function tokensMatch(receivedToken: string | undefined, expectedToken: string) {
   if (!receivedToken) return false;
 
@@ -89,37 +116,120 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'gc-eletronica-ops',
+    version: env.APP_VERSION,
+    uptimeSeconds: Math.floor(process.uptime()),
   });
 });
 
-app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, async (req, res) => {
+app.get('/ready', async (_req, res) => {
   try {
+    await db.collection('webhook_events').limit(1).get();
+    res.json({ ok: true, service: 'gc-eletronica-ops', dependencies: { firestore: 'ok' } });
+  } catch {
+    res.status(503).json({ ok: false, service: 'gc-eletronica-ops', dependencies: { firestore: 'unavailable' } });
+  }
+});
+
+const outboxIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+app.post('/outbox/messages/claim', requireOutboxToken, async (req, res) => {
+  const input = claimMessagesSchema.safeParse(req.body);
+  if (!input.success) return res.status(400).json({ ok: false, error: 'Payload invalido.' });
+  try {
+    const messages = await claimPendingMessages(db, input.data.workerId, input.data.limit);
+    return res.json({ ok: true, messages });
+  } catch (error) {
+    console.error('Outbox claim error:', error);
+    return res.status(500).json({ ok: false, error: 'Erro ao buscar mensagens.' });
+  }
+});
+
+app.post('/outbox/messages/:id/sent', requireOutboxToken, async (req, res) => {
+  const id = outboxIdSchema.safeParse(req.params.id);
+  const input = sentMessageSchema.safeParse(req.body);
+  if (!id.success || !input.success) return res.status(400).json({ ok: false, error: 'Payload invalido.' });
+  try {
+    await markMessageSent(db, id.data, input.data);
+    return res.json({ ok: true, status: 'sent' });
+  } catch (error) {
+    const status = error instanceof OutboxError ? error.statusCode : 500;
+    return res.status(status).json({ ok: false, error: error instanceof OutboxError ? error.message : 'Erro ao confirmar envio.' });
+  }
+});
+
+app.post('/outbox/messages/:id/failed', requireOutboxToken, async (req, res) => {
+  const id = outboxIdSchema.safeParse(req.params.id);
+  const input = failedMessageSchema.safeParse(req.body);
+  if (!id.success || !input.success) return res.status(400).json({ ok: false, error: 'Payload invalido.' });
+  try {
+    await markMessageFailed(db, id.data, input.data);
+    return res.json({ ok: true, status: 'failed' });
+  } catch (error) {
+    const status = error instanceof OutboxError ? error.statusCode : 500;
+    return res.status(status).json({ ok: false, error: error instanceof OutboxError ? error.message : 'Erro ao registrar falha.' });
+  }
+});
+
+app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, async (req, res) => {
+  const suppliedKey = typeof req.headers['x-idempotency-key'] === 'string'
+    ? req.headers['x-idempotency-key']
+    : typeof req.headers['x-event-id'] === 'string'
+      ? req.headers['x-event-id']
+      : undefined;
+  const idempotencyKey = buildIdempotencyKey(req.body, suppliedKey);
+  let claimed = false;
+  let recipientPhone: string | undefined;
+  try {
+    const claim = await claimWebhookEvent(db, idempotencyKey);
+    if (!claim.claimed) {
+      if (claim.response) {
+        res.setHeader('X-Idempotent-Replay', 'true');
+        return res.status(claim.response.statusCode).json(claim.response.body);
+      }
+      return res.status(409).json({ ok: false, status: 'already_processing', retryable: true });
+    }
+    claimed = true;
+    const send = async (statusCode: number, body: Record<string, unknown>) => {
+      if (statusCode >= 200 && statusCode < 300 && recipientPhone && typeof body.reply === 'string') {
+        await enqueueWhatsAppMessage(db, {
+          idempotencyKey,
+          recipient: recipientPhone,
+          text: body.reply,
+          conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined,
+        });
+      }
+      await completeWebhookEvent(db, idempotencyKey, { statusCode, body });
+      return res.status(statusCode).json(body);
+    };
     const bodyValidation = inboundPayloadSchema.safeParse(req.body);
 
     if (!bodyValidation.success) {
-      return res.status(400).json({
+      const response = {
         ok: false,
         status: 'invalid_payload',
         reply: buildInvalidPayloadReply(['payload']),
-      });
+      };
+      return send(400, response);
     }
 
     const parsed = parseInboundMessage(req.body);
+    recipientPhone = parsed.phone;
 
     if (parsed.missingPayloadFields.length > 0) {
-      return res.status(400).json({
+      const response = {
         ok: false,
         status: 'invalid_payload',
         missingPayloadFields: parsed.missingPayloadFields,
         reply: buildInvalidPayloadReply(parsed.missingPayloadFields),
-      });
+      };
+      return send(400, response);
     }
 
     const activeConversation = await findActiveConversationByPhone(db, parsed.phone);
     const intent = detectIntent(parsed.message, activeConversation?.data);
 
     if (activeConversation?.data.status === 'waiting_approval' && activeConversation.data.approvalTaskId) {
-      return res.status(200).json({
+      return send(200, {
         ok: true,
         status: 'waiting_approval',
         intent: intent.intent,
@@ -131,7 +241,7 @@ app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, asyn
     }
 
     if (!activeConversation && !intent.shouldStartServiceFlow) {
-      return res.status(200).json({
+      return send(200, {
         ok: true,
         status: intent.intent === 'complaint' || intent.intent === 'human_help' ? 'needs_human' : 'faq_answer',
         intent: intent.intent,
@@ -155,7 +265,7 @@ app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, asyn
       : undefined;
 
     if (activeConversation && !intent.shouldContinueActiveFlow && faqReply) {
-      return res.status(200).json({
+      return send(200, {
         ok: true,
         status: intent.intent === 'complaint' || intent.intent === 'human_help' ? 'needs_human' : 'faq_answer',
         intent: intent.intent,
@@ -177,7 +287,7 @@ app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, asyn
         receivedAt: parsed.timestamp,
       });
 
-      return res.status(200).json({
+      return send(200, {
         ok: true,
         status: 'collecting_data',
         intent: intent.intent,
@@ -200,7 +310,7 @@ app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, asyn
       conversationId: activeConversation?.id,
     });
 
-    res.status(201).json({
+    const response = {
       ok: true,
       status: 'approval_created',
       intent: intent.intent,
@@ -209,9 +319,11 @@ app.post('/webhooks/whatsapp/inbound', webhookLimiter, requireWebhookToken, asyn
       contactId: result.contact.id,
       conversationId: result.conversation.id,
       reply: result.approvalTask.payload.suggestedReply,
-    });
+    };
+    await send(201, response);
   } catch (error) {
     console.error('Inbound webhook error:', error);
+    if (claimed) await releaseWebhookEvent(db, idempotencyKey).catch(() => undefined);
     res.status(500).json({
       ok: false,
       error: 'Erro ao processar webhook.',
