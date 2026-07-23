@@ -1,4 +1,13 @@
-export type DeviceType = 'celular' | 'video-game' | 'gpu' | 'notebook' | 'outro';
+export type DeviceType =
+  | 'celular'
+  | 'computador'
+  | 'notebook'
+  | 'gpu'
+  | 'video-game'
+  | 'cftv'
+  | 'infra-rede'
+  | 'wifi'
+  | 'outro';
 
 export type ContactSource = 'whatsapp' | 'manual' | 'gctech';
 

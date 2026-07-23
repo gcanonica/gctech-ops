@@ -75,6 +75,16 @@ function hasServiceSignal(text: string) {
     'xbox',
     'gpu',
     'placa de video',
+    'computador',
+    'cftv',
+    'camera de seguranca',
+    'dvr',
+    'nvr',
+    'wifi',
+    'wi fi',
+    'roteador',
+    'cabeamento',
+    'infra de rede',
   ]);
 }
 
