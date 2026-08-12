@@ -34,4 +34,12 @@ describe('parseInboundMessage', () => {
     assert.equal(parsed.fields.deviceName, 'iPhone');
     assert.equal(parsed.fields.problemDescription, 'quanto custa trocar bateria de iphone?');
   });
+
+  it('classifies network and CFTV services supported by the operation', () => {
+    const wifi = parseInboundMessage({ phone: '41988880002', message: 'preciso arrumar meu wifi que nao funciona' });
+    const cftv = parseInboundMessage({ phone: '41988880003', message: 'quero manutencao nas cameras do CFTV' });
+
+    assert.equal(wifi.fields.deviceType, 'wifi');
+    assert.equal(cftv.fields.deviceType, 'cftv');
+  });
 });

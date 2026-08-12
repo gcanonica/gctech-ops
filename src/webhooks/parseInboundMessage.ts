@@ -128,6 +128,34 @@ function inferDeviceType(message: string): DeviceType {
   const normalized = normalizeText(message);
 
   if (
+    normalized.includes('cftv') ||
+    normalized.includes('camera de seguranca') ||
+    normalized.includes('cameras de seguranca') ||
+    normalized.includes('dvr') ||
+    normalized.includes('nvr')
+  ) {
+    return 'cftv';
+  }
+
+  if (
+    normalized.includes('wifi') ||
+    normalized.includes('wi-fi') ||
+    normalized.includes('roteador') ||
+    normalized.includes('internet sem fio')
+  ) {
+    return 'wifi';
+  }
+
+  if (
+    normalized.includes('infra de rede') ||
+    normalized.includes('infraestrutura de rede') ||
+    normalized.includes('cabeamento') ||
+    normalized.includes('rede cabeada')
+  ) {
+    return 'infra-rede';
+  }
+
+  if (
     normalized.includes('iphone') ||
     normalized.includes('android') ||
     normalized.includes('celular') ||
@@ -145,11 +173,13 @@ function inferDeviceType(message: string): DeviceType {
   if (
     normalized.includes('notebook') ||
     normalized.includes('laptop') ||
-    normalized.includes('macbook') ||
-    normalized.includes('computador') ||
-    normalized.includes('pc ')
+    normalized.includes('macbook')
   ) {
     return 'notebook';
+  }
+
+  if (normalized.includes('computador') || /\bpc\b/.test(normalized)) {
+    return 'computador';
   }
 
   if (
@@ -223,6 +253,7 @@ function inferCity(message: string): ServiceCity {
 function inferDeviceName(message: string) {
   const detailToken = String.raw`(?!que\b|com\b|na\b|no\b|nao\b|sem\b|esta\b|ta\b|caiu\b|agua\b|molhou\b|parou\b|liga\b|carrega\b|lento\b|travando\b|desliga\b|quebrad\w*\b|defeito\b|problema\b|tela\b|bateria\b|amanha\b|hoje\b|segunda\b|terca\b|quarta\b|quinta\b|sexta\b|sabado\b|domingo\b|as\b|para\b|quero\b|queria\b|preciso\b)[A-Za-z0-9-]+`;
   const patterns = [
+    /\b(CFTV|DVR|NVR|Wi-?Fi|Roteador|Infraestrutura de rede|Cabeamento de rede)\b/i,
     /\b(iPhone\s?\d{0,2}(?:\s?(?:Pro|Plus|Max|Mini))?)\b/i,
     /\b(PS5|PS4|PlayStation\s?\d?|Xbox\s?(?:One|Series\s?[SX]?)?|Nintendo\s?Switch)\b/i,
     /\b(RTX\s?\d{3,4}|GTX\s?\d{3,4})\b/i,
@@ -251,6 +282,9 @@ function canonicalizeDeviceName(deviceName: string) {
   if (normalized === 'smartphone') return 'Smartphone';
   if (normalized === 'videogame' || normalized === 'video game') return 'Videogame';
   if (normalized === 'computador' || normalized === 'pc') return 'Computador';
+  if (normalized === 'cftv') return 'CFTV';
+  if (normalized === 'wifi' || normalized === 'wi-fi') return 'Wi-Fi';
+  if (normalized === 'roteador') return 'Roteador';
 
   return deviceName;
 }
