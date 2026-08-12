@@ -1,4 +1,11 @@
 node_modules/
 dist/
-.env
+# `.env` sozinho nao cobria `.env.production`, que carrega OPS_WEBHOOK_TOKEN e
+# OPS_OUTBOX_TOKEN. Ignorar toda a familia e liberar apenas os exemplos.
+.env*
+!.env.example
+!.env.production.example
 *.log
+# Chave privada da conta de servico do Firebase, montada pelo docker-compose.
+secrets/
+*service-account*.json
